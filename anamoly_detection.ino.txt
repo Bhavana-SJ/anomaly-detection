@@ -1,0 +1,259 @@
+#define BLYNK_TEMPLATE_ID "TMPL35--0-P5a"
+#define BLYNK_TEMPLATE_NAME "power anomaly detection"
+#define BLYNK_AUTH_TOKEN "lwnSllXxbWFN9XxtVwJ6Tz2PUxOwr4Xy"
+
+#define BLYNK_PRINT Serial
+
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+// ---------------- WIFI ----------------
+char ssid[] = "TEST24";
+char pass[] = "12345678";
+// --------------------------------------
+
+// ------------ PIN DEFINITIONS ----------
+#define CURRENT_PIN 34
+#define VOLTAGE_PIN 35
+#define BUZZER 25
+// --------------------------------------
+
+// LCD ADDRESS
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// -------- CALIBRATION VALUES ----------
+float voltageScale = 0.0063;
+float currentOffset = 2050;
+float currentScale = 0.0005;
+// --------------------------------------
+
+// Impedance threshold
+float thresholdZ = 25.0;
+
+// Variables
+bool alertSent = false;
+int lowZCount = 0;
+
+// -------- FIXED LOCATION --------
+// Replace with your actual location coordinates
+float latitude = 12.967083;
+float longitude = 77.716164;
+// --------------------------------
+
+// -------- RMS FUNCTION ----------
+float readRMS(int pin) {
+
+  float sum = 0;
+  int samples = 200;
+
+  for (int i = 0; i < samples; i++) {
+
+    float value = analogRead(pin);
+
+    sum += value * value;
+
+    delayMicroseconds(200);
+  }
+
+  return sqrt(sum / samples);
+}
+// --------------------------------
+
+void setup() {
+
+  Serial.begin(115200);
+
+  // Pin setup
+  pinMode(BUZZER, OUTPUT);
+
+  // -------- LCD START --------
+
+  lcd.begin();
+  lcd.backlight();
+
+  lcd.setCursor(0, 0);
+  lcd.print("POWER MONITOR");
+
+  lcd.setCursor(0, 1);
+  lcd.print("Starting...");
+
+  delay(2000);
+
+  lcd.clear();
+
+  // -------- WIFI CONNECT --------
+
+  Serial.println("Connecting WiFi...");
+
+  WiFi.mode(WIFI_STA);
+
+  WiFi.disconnect(true);
+
+  delay(2000);
+
+  WiFi.begin(ssid, pass);
+
+  while (WiFi.status() != WL_CONNECTED) {
+
+    delay(500);
+
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi Connected!");
+
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  // -------- BLYNK CONNECT --------
+
+  Blynk.config(BLYNK_AUTH_TOKEN, "blynk.cloud", 8080);
+
+  if (Blynk.connect()) {
+
+    Serial.println("Blynk Connected!");
+
+  } else {
+
+    Serial.println("Blynk Connection Failed!");
+  }
+
+  // LCD MESSAGE
+  lcd.setCursor(0, 0);
+  lcd.print("WiFi Connected");
+
+  delay(1500);
+
+  lcd.clear();
+}
+
+void loop() {
+
+  // -------- BLYNK RUN --------
+
+  if (Blynk.connected()) {
+
+    Blynk.run();
+
+  } else {
+
+    Serial.println("Reconnecting Blynk...");
+
+    Blynk.connect();
+  }
+
+  // -------- SENSOR READING --------
+
+  float rawV = readRMS(VOLTAGE_PIN);
+
+  float rawI = readRMS(CURRENT_PIN);
+
+  // Calibration
+  float Vrms = rawV * voltageScale;
+
+  float Irms = abs(rawI - currentOffset) * currentScale;
+
+  // Prevent divide by zero
+  if (Irms < 0.01) {
+
+    Irms = 0.01;
+  }
+
+  // Impedance
+  float Z = Vrms / Irms;
+
+  // -------- SERIAL MONITOR --------
+
+  Serial.print("Voltage: ");
+  Serial.print(Vrms);
+
+  Serial.print(" V Current: ");
+  Serial.print(Irms);
+
+  Serial.print(" A Impedance: ");
+  Serial.println(Z);
+
+  // -------- THEFT DETECTION --------
+
+  bool theft = false;
+
+  // Detect abnormal impedance
+  if (Z > thresholdZ) {
+
+    lowZCount++;
+
+  } else {
+
+    lowZCount = 0;
+  }
+
+  // Noise filtering
+  if (lowZCount >= 3) {
+
+    theft = true;
+
+    digitalWrite(BUZZER, HIGH);
+
+    if (!alertSent) {
+
+      String alertMessage =
+      "⚠️ Power Theft Detected!\nLocation:\nhttps://maps.google.com/?q=" +
+      String(latitude, 6) + "," +
+      String(longitude, 6);
+
+      Blynk.logEvent(
+        "theft_alert",
+        alertMessage
+      );
+
+      alertSent = true;
+    }
+
+  } else {
+
+    digitalWrite(BUZZER, LOW);
+
+    alertSent = false;
+  }
+
+  // -------- SEND TO BLYNK --------
+
+  Blynk.virtualWrite(V0, Vrms); // Voltage
+
+  Blynk.virtualWrite(V1, Irms); // Current
+
+  Blynk.virtualWrite(V2, Z); // Impedance
+
+  Blynk.virtualWrite(V3, theft); // Theft Status
+
+  // -------- LCD DISPLAY --------
+
+  lcd.setCursor(0, 0);
+
+  lcd.print("V:");
+  lcd.print(Vrms, 1);
+
+  lcd.print(" I:");
+  lcd.print(Irms, 2);
+
+  lcd.print(" ");
+
+  lcd.setCursor(0, 1);
+
+  if (theft) {
+
+    lcd.print("THEFT DETECTED ");
+
+  } else {
+
+    lcd.print("SAFE Z:");
+
+    lcd.print(Z, 1);
+
+    lcd.print(" ");
+  }
+
+  delay(1000);
+}
